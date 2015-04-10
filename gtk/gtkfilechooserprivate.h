@@ -32,10 +32,12 @@
 #include "gtktreestore.h"
 #include "gtktreeview.h"
 #include "gtkbox.h"
+#include "gtkiconview.h"
 
 G_BEGIN_DECLS
 
 #define SETTINGS_KEY_LOCATION_MODE          "location-mode"
+#define SETTINGS_KEY_VIEW_MODE              "view-mode"
 #define SETTINGS_KEY_SHOW_HIDDEN            "show-hidden"
 #define SETTINGS_KEY_SHOW_SIZE_COLUMN       "show-size-column"
 #define SETTINGS_KEY_SHOW_TYPE_COLUMN       "show-type-column"
@@ -60,34 +62,34 @@ struct _GtkFileChooserIface
 
   /* Methods
    */
-  gboolean       (*set_current_folder) 	   (GtkFileChooser    *chooser,
-					    GFile             *file,
-					    GError           **error);
-  GFile *        (*get_current_folder) 	   (GtkFileChooser    *chooser);
-  void           (*set_current_name)   	   (GtkFileChooser    *chooser,
-					    const gchar       *name);
+  gboolean       (*set_current_folder)     (GtkFileChooser    *chooser,
+                                            GFile             *file,
+                                            GError           **error);
+  GFile *        (*get_current_folder)     (GtkFileChooser    *chooser);
+  void           (*set_current_name)       (GtkFileChooser    *chooser,
+                                            const gchar       *name);
   gchar *        (*get_current_name)       (GtkFileChooser    *chooser);
-  gboolean       (*select_file)        	   (GtkFileChooser    *chooser,
-					    GFile             *file,
-					    GError           **error);
-  void           (*unselect_file)      	   (GtkFileChooser    *chooser,
-					    GFile             *file);
-  void           (*select_all)         	   (GtkFileChooser    *chooser);
-  void           (*unselect_all)       	   (GtkFileChooser    *chooser);
-  GSList *       (*get_files)          	   (GtkFileChooser    *chooser);
-  GFile *        (*get_preview_file)   	   (GtkFileChooser    *chooser);
-  GtkFileSystem *(*get_file_system)    	   (GtkFileChooser    *chooser);
-  void           (*add_filter)         	   (GtkFileChooser    *chooser,
-					    GtkFileFilter     *filter);
-  void           (*remove_filter)      	   (GtkFileChooser    *chooser,
-					    GtkFileFilter     *filter);
-  GSList *       (*list_filters)       	   (GtkFileChooser    *chooser);
+  gboolean       (*select_file)            (GtkFileChooser    *chooser,
+                                            GFile             *file,
+                                            GError           **error);
+  void           (*unselect_file)          (GtkFileChooser    *chooser,
+                                            GFile             *file);
+  void           (*select_all)             (GtkFileChooser    *chooser);
+  void           (*unselect_all)           (GtkFileChooser    *chooser);
+  GSList *       (*get_files)              (GtkFileChooser    *chooser);
+  GFile *        (*get_preview_file)       (GtkFileChooser    *chooser);
+  GtkFileSystem *(*get_file_system)        (GtkFileChooser    *chooser);
+  void           (*add_filter)             (GtkFileChooser    *chooser,
+                                            GtkFileFilter     *filter);
+  void           (*remove_filter)          (GtkFileChooser    *chooser,
+                                            GtkFileFilter     *filter);
+  GSList *       (*list_filters)           (GtkFileChooser    *chooser);
   gboolean       (*add_shortcut_folder)    (GtkFileChooser    *chooser,
-					    GFile             *file,
-					    GError           **error);
+                                            GFile             *file,
+                                            GError           **error);
   gboolean       (*remove_shortcut_folder) (GtkFileChooser    *chooser,
-					    GFile             *file,
-					    GError           **error);
+                                            GFile             *file,
+                                            GError           **error);
   GSList *       (*list_shortcut_folders)  (GtkFileChooser    *chooser);
 
   /* Signals
@@ -115,11 +117,11 @@ struct _GtkFileChooserIface
 
 GtkFileSystem *_gtk_file_chooser_get_file_system         (GtkFileChooser    *chooser);
 gboolean       _gtk_file_chooser_add_shortcut_folder     (GtkFileChooser    *chooser,
-							  GFile             *folder,
-							  GError           **error);
+                                                          GFile             *folder,
+                                                          GError           **error);
 gboolean       _gtk_file_chooser_remove_shortcut_folder  (GtkFileChooser    *chooser,
-							  GFile             *folder,
-							  GError           **error);
+                                                          GFile             *folder,
+                                                          GError           **error);
 GSList *       _gtk_file_chooser_list_shortcut_folder_files (GtkFileChooser *chooser);
 
 

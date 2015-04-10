@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!-- Generated with glade 3.18.1 -->
 <interface domain="gtk30">
-  <!-- interface-requires gtk+ 3.10 -->
-  <!-- interface-requires gtkprivate 3.10 -->
+  <requires lib="gtk+" version="3.10"/>
+  <requires lib="gtkprivate" version="3.10"/>
   <template class="GtkFileChooserWidget" parent="GtkBox">
     <property name="orientation">vertical</property>
     <child>
@@ -135,6 +136,9 @@
                         </child>
                       </object>
                     </child>
+                    <style>
+                      <class name="search-bar"/>
+                    </style>
                   </object>
                   <packing>
                     <property name="fill">0</property>
@@ -331,6 +335,23 @@
                                 <property name="top-attach">1</property>
                               </packing>
                             </child>
+                          </object>
+                        </child>
+                        <child type="tab">
+                          <object class="GtkLabel" id="label_list_view">
+                            <property name="visible">True</property>
+                            <property name="can_focus">False</property>
+                            <property name="label" translatable="yes">List View</property>
+                          </object>
+                          <packing>
+                            <property name="tab_fill">False</property>
+                          </packing>
+                        </child>
+                        <child>
+                          <object class="GtkScrolledWindow" id="browse_files_icon_swin">
+                            <property name="visible">True</property>
+                            <property name="can_focus">True</property>
+                            <property name="shadow_type">in</property>
                             <child>
                               <object class="GtkLabel">
                                 <property name="visible">1</property>
