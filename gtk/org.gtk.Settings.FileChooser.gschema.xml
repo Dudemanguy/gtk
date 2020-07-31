@@ -75,6 +75,17 @@
     </key>
     <key name='view-mode' enum='org.gtk.Settings.FileChooser.ViewMode'>
       <default>'list-view'</default>
+      <summary>Change view mode</summary>
+      <description>
+        Controls the view mode used.
+      </description>
+    </key>
+    <key name='icon-view-scale' type='i'>
+      <default>48</default>
+      <summary>Change icon size</summary>
+      <description>
+        Controls the size of the icons in icon view mode.
+      </description>
     </key>
     <key name='show-hidden' type='b'>
       <default>false</default>
