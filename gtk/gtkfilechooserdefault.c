@@ -1303,7 +1303,7 @@ shortcuts_reload_icons (GtkFileChooserDefault *impl)
 
 	      volume = data;
 	      pixbuf = _gtk_file_system_volume_render_icon (volume, GTK_WIDGET (impl),
-						 	    impl->list_view_icon_size, NULL);
+                                                            impl->list_view_icon_size, NULL);
 	    }
 	  else if (shortcut_type == SHORTCUT_TYPE_FILE)
             {
@@ -1658,7 +1658,7 @@ shortcuts_insert_file (GtkFileChooserDefault *impl,
       data = volume;
       label_copy = _gtk_file_system_volume_get_display_name (volume);
       pixbuf = _gtk_file_system_volume_render_icon (volume, GTK_WIDGET (impl),
-				 		    impl->list_view_icon_size, NULL);
+                                                    impl->list_view_icon_size, NULL);
     }
   else if (shortcut_type == SHORTCUT_TYPE_FILE)
     {
@@ -2346,7 +2346,7 @@ new_folder_button_clicked (GtkButton             *button,
       gtk_tree_view_scroll_to_cell (GTK_TREE_VIEW (impl->browse_files_tree_view),
                                     path, impl->list_name_column,
                                     FALSE, 0.0, 0.0);
- 
+
       g_object_set (impl->list_name_renderer, "editable", TRUE, NULL);
       gtk_tree_view_set_cursor (GTK_TREE_VIEW (impl->browse_files_tree_view),
                                 path,
@@ -4346,7 +4346,7 @@ file_list_build_popup_menu (GtkFileChooserDefault *impl)
                         G_CALLBACK (sort_descending_toggled_cb), impl);
       gtk_widget_show (subitem);
       gtk_menu_shell_append (GTK_MENU_SHELL (menu), subitem);
-      
+
       gtk_widget_show (item);
       gtk_menu_shell_append (GTK_MENU_SHELL (impl->browse_files_popup_menu), item);
     }
@@ -4722,7 +4722,7 @@ static GtkWidget *
 create_browse_files_icon_view (GtkFileChooserDefault *impl)
 {
   impl->browse_files_icon_view = gtk_icon_view_new ();
-  
+
   g_object_set_data (G_OBJECT (impl->browse_files_icon_view), I_("GtkFileChooserDefault"), impl);
   gtk_icon_view_set_item_padding (GTK_ICON_VIEW (impl->browse_files_icon_view), 0);
 
@@ -4758,7 +4758,7 @@ create_browse_files_icon_view (GtkFileChooserDefault *impl)
   g_object_set (G_OBJECT (impl->list_icon_renderer),
                 "ypad", 3u,
                 NULL);
-  
+
   set_icon_cell_renderer_fixed_size (impl, GTK_CELL_RENDERER (impl->list_icon_renderer),
                                      VIEW_MODE_ICON);
 
@@ -5257,7 +5257,7 @@ icon_view_scale_create (GtkFileChooserDefault *impl)
   gtk_size_group_add_widget (impl->browse_path_bar_size_group, impl->icon_view_scale_zoom_in_icon);
   gtk_box_pack_start (GTK_BOX (impl->icon_view_scale_hbox), impl->icon_view_scale_zoom_in_icon, FALSE, FALSE, 0);
   gtk_widget_show (impl->icon_view_scale_zoom_in_icon);
-  
+
   g_signal_connect (impl->icon_view_scale, "value-changed",
                     G_CALLBACK (icon_view_scale_value_changed_cb), impl);
 
@@ -8841,7 +8841,6 @@ get_selected_file_info_from_file_list (GtkFileChooserDefault *impl,
           *had_selection = FALSE;
           return NULL;
         }
- 
       *had_selection = TRUE;
     }
   else if (impl->view_mode == VIEW_MODE_ICON)
@@ -11277,4 +11276,3 @@ current_view_set_select_multiple (GtkFileChooserDefault *impl, gboolean select_m
   else
     g_assert_not_reached ();
 }
-
