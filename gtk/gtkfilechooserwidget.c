@@ -28,6 +28,7 @@
 #include "gtkcellrendererpixbuf.h"
 #include "gtkcellrenderertext.h"
 #include "gtkdropdown.h"
+#include "gtkcombobox.h"
 #include "gtkcssnumbervalueprivate.h"
 #include "gtkdragsource.h"
 #include "gtkdroptarget.h"
@@ -39,11 +40,15 @@
 #include "gtkfilechooser.h"
 #include "gtkfilesystemmodel.h"
 #include "gtkgrid.h"
+#include "gtkgridview.h"
 #include "gtkicontheme.h"
+#include "gtkiconview.h"
 #include "gtklabel.h"
+#include "gtklistitem.h"
 #include "gtkmarshalers.h"
 #include "gtkmessagedialog.h"
 #include "gtkmountoperation.h"
+#include "gtknotebook.h"
 #include "gtkpaned.h"
 #include "gtkpathbar.h"
 #include "gtkplacessidebarprivate.h"
@@ -52,6 +57,7 @@
 #include "gtkrecentmanager.h"
 #include "gtksearchentryprivate.h"
 #include "gtksettings.h"
+#include "gtksignallistitemfactory.h"
 #include "gtksizegroup.h"
 #include "gtksizerequest.h"
 #include "gtkstack.h"
@@ -89,6 +95,7 @@
 #include "gtkstringlist.h"
 
 #include <cairo-gobject.h>
+#include <math.h>
 
 #ifdef HAVE_UNISTD_H
 #include <unistd.h>
@@ -150,6 +157,11 @@ typedef enum {
 } StartupMode;
 
 typedef enum {
+  VIEW_MODE_LIST,
+  VIEW_MODE_ICON,
+} ViewMode;
+
+typedef enum {
   CLOCK_FORMAT_24,
   CLOCK_FORMAT_12
 } ClockFormat;
@@ -186,8 +198,12 @@ struct _GtkFileChooserWidget
   GtkWidget *browse_header_revealer;
   GtkWidget *browse_header_stack;
   GtkWidget *browse_files_stack;
-  GtkWidget *browse_files_swin;
+  GtkNotebook *view_notebook;
+  GtkWidget *browse_files_list_swin;
+  GtkWidget *browse_files_icon_swin;
+  GtkWidget *browse_files_current_view;
   GtkWidget *browse_files_tree_view;
+  GtkWidget *browse_files_icon_view;
   GtkWidget *remote_warning_bar;
 
   GtkWidget *browse_files_popover;
@@ -205,6 +221,7 @@ struct _GtkFileChooserWidget
   GtkWidget *rename_file_popover;
   GFile *rename_file_source_file;
 
+  GtkTreeModel *current_model;
   GtkFileSystemModel *browse_files_model;
   char *browse_files_last_selected_name;
 
@@ -279,7 +296,16 @@ struct _GtkFileChooserWidget
 
   gulong settings_signal_id;
 
+  gint list_view_icon_size;
+  gint icon_view_icon_size;
+
   GSource *focus_entry_idle;
+
+  GtkWidget *view_mode_combo_box;
+  GtkWidget *icon_view_scale;
+  ViewMode view_mode;
+
+  GtkCellRenderer *list_icon_renderer;
 
   gulong toplevel_set_focus_id;
   GtkWidget *toplevel_current_focus_widget;
@@ -352,6 +378,8 @@ enum {
   MODEL_COL_NAME_COLLATED,
   MODEL_COL_IS_FOLDER,
   MODEL_COL_IS_SENSITIVE,
+  MODEL_COL_LIST_SURFACE,
+  MODEL_COL_ICON_PIXBUF,
   MODEL_COL_ICON,
   MODEL_COL_SIZE_TEXT,
   MODEL_COL_DATE_TEXT,
@@ -372,6 +400,8 @@ enum {
         G_TYPE_STRING,            /* MODEL_COL_NAME_COLLATED */ \
         G_TYPE_BOOLEAN,           /* MODEL_COL_IS_FOLDER */     \
         G_TYPE_BOOLEAN,           /* MODEL_COL_IS_SENSITIVE */  \
+        CAIRO_GOBJECT_TYPE_SURFACE,  /* MODEL_COL_LIST_SURFACE */ \
+        GDK_TYPE_PIXBUF,          /* MODEL_COL_ICON_PIXBUF */   \
         G_TYPE_ICON,              /* MODEL_COL_ICON */          \
         G_TYPE_STRING,            /* MODEL_COL_SIZE_TEXT */     \
         G_TYPE_STRING,            /* MODEL_COL_DATE_TEXT */     \
@@ -381,7 +411,10 @@ enum {
 
 #define DEFAULT_RECENT_FILES_LIMIT 50
 
-#define ICON_SIZE 16
+#define LIST_VIEW_ICON_SIZE 16
+#define ICON_VIEW_ICON_SIZE 32
+
+#define ICON_VIEW_ITEM_WIDTH 128
 
 static void gtk_file_chooser_widget_iface_init       (GtkFileChooserIface        *iface);
 
@@ -485,11 +518,18 @@ static gboolean list_select_func   (GtkTreeSelection      *selection,
                                     gboolean               path_currently_selected,
                                     gpointer               data);
 
-static void list_selection_changed     (GtkTreeSelection      *tree_selection,
+static void list_selection_changed     (void                  *selection,
                                         GtkFileChooserWidget  *impl);
 static void list_row_activated         (GtkTreeView           *tree_view,
                                         GtkTreePath           *path,
                                         GtkTreeViewColumn     *column,
+                                        GtkFileChooserWidget  *impl);
+
+static void icon_item_activated        (GtkIconView           *icon_view,
+                                        GtkTreePath           *path,
+                                        GtkFileChooserWidget  *impl);
+static void item_activated             (GtkTreeModel          *model,
+                                        GtkTreePath           *path,
                                         GtkFileChooserWidget  *impl);
 
 static void path_bar_clicked (GtkPathBar            *path_bar,
@@ -502,6 +542,13 @@ static void update_cell_renderer_attributes (GtkFileChooserWidget *impl);
 
 static void load_remove_timer (GtkFileChooserWidget *impl, LoadState new_load_state);
 static void browse_files_center_selected_row (GtkFileChooserWidget *impl);
+
+static void icon_view_scale_value_changed_cb (GtkRange             *range,
+                                              GtkFileChooserWidget *impl);
+
+static void view_mode_set (GtkFileChooserWidget *impl, ViewMode view_mode);
+static void view_mode_combo_box_changed_cb (GtkComboBox          *combo,
+                                            GtkFileChooserWidget *impl);
 
 static void location_switch_to_path_bar (GtkFileChooserWidget *impl);
 
@@ -527,6 +574,27 @@ static gboolean recent_files_setting_is_enabled (GtkFileChooserWidget *impl);
 static void     recent_start_loading         (GtkFileChooserWidget *impl);
 static void     recent_clear_model           (GtkFileChooserWidget *impl,
                                               gboolean               remove_from_treeview);
+
+static gboolean get_selected_tree_iter_from_icon_view (GtkFileChooserWidget  *impl,
+                                                       GtkTreeIter           *iter_out);
+static void     current_selection_selected_foreach    (GtkFileChooserWidget       *impl,
+                                                       GtkTreeSelectionForeachFunc func,
+                                                       gpointer                    data);
+static guint    current_selection_count_selected_rows (GtkFileChooserWidget  *impl);
+static void     current_selection_select_iter         (GtkFileChooserWidget  *impl,
+                                                       GtkTreeIter           *iter);
+static void     copy_old_selection_to_current_view    (GtkFileChooserWidget  *impl,
+                                                       ViewMode               old_view_mode);
+static void     current_selection_unselect_iter       (GtkFileChooserWidget  *impl,
+                                                       GtkTreeIter           *iter);
+static void     current_selection_unselect_all        (GtkFileChooserWidget  *impl);
+static void     current_view_set_file_model           (GtkFileChooserWidget  *impl,
+                                                       GtkTreeModel          *model);
+static void     current_view_set_cursor               (GtkFileChooserWidget  *impl,
+                                                       GtkTreePath           *path);
+static void     current_view_set_select_multiple      (GtkFileChooserWidget  *impl,
+                                                       gboolean select_multiple);
+
 static gboolean recent_should_respond        (GtkFileChooserWidget *impl);
 static void     clear_model_cache            (GtkFileChooserWidget *impl,
                                               int                   column);
@@ -1033,17 +1101,15 @@ selection_check (GtkFileChooserWidget *impl,
                  gboolean              *all_folders)
 {
   struct selection_check_closure closure;
-  GtkTreeSelection *selection;
 
   closure.impl = impl;
   closure.num_selected = 0;
   closure.all_files = TRUE;
   closure.all_folders = TRUE;
 
-  selection = gtk_tree_view_get_selection (GTK_TREE_VIEW (impl->browse_files_tree_view));
-  gtk_tree_selection_selected_foreach (selection,
-                                       selection_check_foreach_cb,
-                                       &closure);
+  current_selection_selected_foreach (impl,
+                                      selection_check_foreach_cb,
+                                      &closure);
 
   g_assert (closure.num_selected == 0 || !(closure.all_files && closure.all_folders));
 
@@ -2078,14 +2144,16 @@ typedef struct {
 static void
 file_list_set_sort_column_ids (GtkFileChooserWidget *impl)
 {
-
-  gtk_tree_view_set_search_column (GTK_TREE_VIEW (impl->browse_files_tree_view), -1);
-
-  gtk_tree_view_column_set_sort_column_id (impl->list_name_column, MODEL_COL_NAME);
-  gtk_tree_view_column_set_sort_column_id (impl->list_time_column, MODEL_COL_TIME);
-  gtk_tree_view_column_set_sort_column_id (impl->list_size_column, MODEL_COL_SIZE);
-  gtk_tree_view_column_set_sort_column_id (impl->list_type_column, MODEL_COL_TYPE);
-  gtk_tree_view_column_set_sort_column_id (impl->list_location_column, MODEL_COL_LOCATION_TEXT);
+  if (impl->view_mode == VIEW_MODE_LIST)
+    {
+      gtk_tree_view_set_search_column (GTK_TREE_VIEW (impl->browse_files_tree_view), -1);
+ 
+      gtk_tree_view_column_set_sort_column_id (impl->list_name_column, MODEL_COL_NAME);
+      gtk_tree_view_column_set_sort_column_id (impl->list_time_column, MODEL_COL_TIME);
+      gtk_tree_view_column_set_sort_column_id (impl->list_size_column, MODEL_COL_SIZE);
+      gtk_tree_view_column_set_sort_column_id (impl->list_type_column, MODEL_COL_TYPE);
+      gtk_tree_view_column_set_sort_column_id (impl->list_location_column, MODEL_COL_LOCATION_TEXT);
+    }
 }
 
 static gboolean
@@ -2106,12 +2174,22 @@ file_list_query_tooltip_cb (GtkWidget  *widget,
   if (impl->operation_mode == OPERATION_MODE_BROWSE)
     return FALSE;
 
-
-  if (!gtk_tree_view_get_tooltip_context (GTK_TREE_VIEW (impl->browse_files_tree_view),
-                                          x, y,
-                                          keyboard_tip,
-                                          &model, &path, &iter))
-    return FALSE;
+  if (impl->view_mode == VIEW_MODE_LIST)
+    {
+      if (!gtk_tree_view_get_tooltip_context (GTK_TREE_VIEW (impl->browse_files_tree_view),
+                                              &x, &y,
+                                              keyboard_tip,
+                                              &model, &path, &iter))
+        return FALSE;
+    }
+  else if(impl->view_mode == VIEW_MODE_ICON)
+    {
+      if (!gtk_icon_view_get_tooltip_context (GTK_ICON_VIEW (impl->browse_files_icon_view),
+                                              &x, &y,
+                                              keyboard_tip,
+                                              &model, &path, &iter))
+        return FALSE;
+    }
 
   gtk_tree_model_get (model, &iter,
                       MODEL_COL_FILE, &file,
@@ -2125,9 +2203,18 @@ file_list_query_tooltip_cb (GtkWidget  *widget,
 
   filename = g_file_get_path (file);
   gtk_tooltip_set_text (tooltip, filename);
-  gtk_tree_view_set_tooltip_row (GTK_TREE_VIEW (impl->browse_files_tree_view),
-                                 tooltip,
-                                 path);
+  if (impl->view_mode == VIEW_MODE_LIST)
+    {
+      gtk_tree_view_set_tooltip_row (GTK_TREE_VIEW (impl->browse_files_tree_view),
+                                     tooltip,
+                                     path);
+    }
+  else if(impl->view_mode == VIEW_MODE_ICON)
+    {
+      gtk_icon_view_set_tooltip_item (GTK_ICON_VIEW (impl->browse_files_icon_view),
+                                      tooltip,
+                                      path);
+    }
 
   g_free (filename);
   g_object_unref (file);
@@ -2143,8 +2230,8 @@ set_icon_cell_renderer_fixed_size (GtkFileChooserWidget *impl)
 
   gtk_cell_renderer_get_padding (impl->list_pixbuf_renderer, &xpad, &ypad);
   gtk_cell_renderer_set_fixed_size (impl->list_pixbuf_renderer,
-                                    xpad * 2 + ICON_SIZE,
-                                    ypad * 2 + ICON_SIZE);
+                                    xpad * 2 + LIST_VIEW_ICON_SIZE,
+                                    ypad * 2 + LIST_VIEW_ICON_SIZE);
 }
 
 static GtkWidget *
@@ -2450,7 +2537,7 @@ location_mode_set (GtkFileChooserWidget *impl,
           location_switch_to_path_bar (impl);
 
           if (switch_to_file_list)
-            gtk_widget_grab_focus (impl->browse_files_tree_view);
+            gtk_widget_grab_focus (impl->browse_files_current_view);
 
           break;
 
@@ -2510,6 +2597,134 @@ location_toggle_popup_handler (GtkFileChooserWidget *impl)
           gtk_widget_grab_focus (impl->location_entry);
         }
     }
+}
+
+static void
+setup_simple_listitem_cb (GtkListItemFactory *factory,
+                          GtkListItem        *list_item)
+{
+  GtkWidget *label = gtk_label_new("");
+  gtk_list_item_set_child (list_item, label);
+}
+
+static void
+create_browse_files_icon_view (GtkFileChooserWidget *impl)
+{
+  GtkWidget *gridview = impl->browse_files_icon_view;
+  GtkListItemFactory *factory;
+
+  gridview = gtk_grid_view_new (NULL, NULL);
+  gtk_scrollable_set_hscroll_policy (GTK_SCROLLABLE (gridview), GTK_SCROLL_NATURAL);
+  gtk_scrollable_set_vscroll_policy (GTK_SCROLLABLE (gridview), GTK_SCROLL_NATURAL);
+
+  factory = gtk_signal_list_item_factory_new ();
+  g_signal_connect (factory, "setup", G_CALLBACK (setup_simple_listitem_cb), NULL);
+  gtk_grid_view_set_factory (GTK_GRID_VIEW (gridview), factory);
+  //g_object_unref (factory);
+
+  gtk_grid_view_set_max_columns (GTK_GRID_VIEW (gridview), 24);
+  gtk_grid_view_set_enable_rubberband (GTK_GRID_VIEW (gridview), TRUE);
+  /*gtk_icon_view_set_text_column (GTK_ICON_VIEW (impl->browse_files_icon_view),
+                                 MODEL_COL_NAME);
+  gtk_icon_view_set_pixbuf_column (GTK_ICON_VIEW (impl->browse_files_icon_view),
+                                   MODEL_COL_ICON_PIXBUF);
+  gtk_icon_view_set_item_width (GTK_ICON_VIEW (impl->browse_files_icon_view),
+                                ICON_VIEW_ITEM_WIDTH);*/
+}
+
+static void
+view_mode_set (GtkFileChooserWidget *impl, ViewMode view_mode)
+{
+  GtkWidget *old_view = NULL;
+  ViewMode old_view_mode = impl->view_mode;
+  impl->browse_files_popover = NULL;
+
+  if (old_view_mode == view_mode)
+    return;
+
+  g_debug("GtkFileChooserWidget::view_mode_set %d", view_mode);
+
+  impl->view_mode = view_mode;
+  gtk_combo_box_set_active (GTK_COMBO_BOX (impl->view_mode_combo_box),
+                            view_mode);
+
+  /* Creating the target view */
+  if (view_mode == VIEW_MODE_ICON)
+    {
+      impl->browse_files_current_view = impl->browse_files_icon_view;
+      old_view = impl->browse_files_tree_view;
+      gtk_widget_show (impl->icon_view_scale);
+    }
+  else if (view_mode == VIEW_MODE_LIST)
+    {
+      impl->browse_files_current_view = impl->browse_files_tree_view;
+      old_view = impl->browse_files_icon_view;
+      gtk_widget_hide (impl->icon_view_scale);
+    }
+  else
+    g_assert_not_reached ();
+
+  /* Set model and selection */
+  current_view_set_file_model (impl, impl->current_model);
+  current_view_set_select_multiple (impl, impl->select_multiple);
+  copy_old_selection_to_current_view (impl, old_view_mode);
+
+  /* Hide the old view */
+  g_object_set (old_view, "model", NULL, NULL);
+  gtk_widget_hide (old_view);
+
+  /* Show the new view */
+  gtk_widget_show (impl->browse_files_current_view);
+  gtk_notebook_set_current_page(impl->view_notebook, view_mode);
+}
+
+/* Callback used when view mode combo box active item is changed */
+static void
+view_mode_combo_box_changed_cb (GtkComboBox          *combo,
+                                GtkFileChooserWidget *impl)
+{
+  ViewMode target = gtk_combo_box_get_active (combo);
+
+  view_mode_set (impl, target);
+}
+
+/* Callback used when view mode is changed */
+static gboolean
+view_notebook_switch_page_cb (GtkNotebook *notebook,
+               GtkWidget   *page,
+               guint        page_num,
+               gpointer     user_data)
+{
+  GtkFileChooserWidget *impl = GTK_FILE_CHOOSER_WIDGET (user_data);
+  view_mode_set (impl, page_num);
+  return TRUE;
+}
+
+static void
+icon_view_scale_value_changed_cb (GtkRange             *range,
+                                  GtkFileChooserWidget *impl)
+{
+  gdouble value = gtk_range_get_value (range);
+  value = round (value / 16) * 16;
+
+  if (impl->icon_view_icon_size == (gint)value)
+    return;
+
+  impl->icon_view_icon_size = (gint)value;
+
+  if (impl->view_mode != VIEW_MODE_ICON)
+    return;
+
+  set_icon_cell_renderer_fixed_size (impl);
+
+  if (impl->browse_files_model)
+    _gtk_file_system_model_clear_cache (impl->browse_files_model, MODEL_COL_ICON_PIXBUF);
+  if (impl->search_model)
+    _gtk_file_system_model_clear_cache (impl->search_model, MODEL_COL_ICON_PIXBUF);
+  if (impl->recent_model)
+    _gtk_file_system_model_clear_cache (impl->recent_model, MODEL_COL_ICON_PIXBUF);
+
+  gtk_widget_queue_resize (impl->browse_files_current_view);
 }
 
 static void
@@ -2578,18 +2793,10 @@ static void
 set_select_multiple (GtkFileChooserWidget *impl,
                      gboolean               select_multiple)
 {
-  GtkTreeSelection *selection;
-  GtkSelectionMode mode;
-
   if (select_multiple == impl->select_multiple)
     return;
 
-  mode = select_multiple ? GTK_SELECTION_MULTIPLE : GTK_SELECTION_SINGLE;
-
-  selection = gtk_tree_view_get_selection (GTK_TREE_VIEW (impl->browse_files_tree_view));
-  gtk_tree_selection_set_mode (selection, mode);
-
-  gtk_tree_view_set_rubber_banding (GTK_TREE_VIEW (impl->browse_files_tree_view), select_multiple);
+  current_view_set_select_multiple (impl, select_multiple);
 
   impl->select_multiple = select_multiple;
   g_object_notify (G_OBJECT (impl), "select-multiple");
@@ -2688,6 +2895,7 @@ operation_mode_set_enter_location (GtkFileChooserWidget *impl)
   gtk_stack_set_visible_child_name (GTK_STACK (impl->browse_header_stack), "location");
   gtk_revealer_set_reveal_child (GTK_REVEALER (impl->browse_header_revealer), TRUE);
   location_bar_update (impl);
+  gtk_tree_view_column_set_visible (impl->list_location_column, FALSE);
   gtk_widget_set_sensitive (impl->filter_combo, TRUE);
   location_mode_set (impl, LOCATION_MODE_FILENAME_ENTRY);
 }
@@ -2723,7 +2931,7 @@ operation_mode_set_search (GtkFileChooserWidget *impl)
   visible_widget = gtk_stack_get_visible_child (GTK_STACK (impl->browse_files_stack));
 
   if (visible_widget != impl->places_view &&
-      visible_widget != impl->browse_files_swin)
+      visible_widget != impl->browse_files_list_swin)
     {
       gtk_stack_set_visible_child_name (GTK_STACK (impl->browse_files_stack), "list");
     }
@@ -2851,6 +3059,12 @@ update_appearance (GtkFileChooserWidget *impl)
       location_mode_set (impl, impl->location_mode);
     }
 
+  if (impl->action == GTK_FILE_CHOOSER_ACTION_OPEN ||
+      impl->action == GTK_FILE_CHOOSER_ACTION_SAVE)
+    gtk_widget_show (impl->view_mode_combo_box);
+  else
+    gtk_widget_hide (impl->view_mode_combo_box);
+
   if (impl->location_entry)
     _gtk_file_chooser_entry_set_action (GTK_FILE_CHOOSER_ENTRY (impl->location_entry), impl->action);
 
@@ -2859,7 +3073,7 @@ update_appearance (GtkFileChooserWidget *impl)
   /* This *is* needed; we need to redraw the file list because the "sensitivity"
    * of files may change depending whether we are in a file or folder-only mode.
    */
-  gtk_widget_queue_draw (impl->browse_files_tree_view);
+  gtk_widget_queue_draw (impl->browse_files_current_view);
 }
 
 static char *
@@ -3178,7 +3392,7 @@ change_icon_theme (GtkFileChooserWidget *impl)
   set_icon_cell_renderer_fixed_size (impl);
 
   clear_model_cache (impl, MODEL_COL_ICON);
-  gtk_widget_queue_resize (impl->browse_files_tree_view);
+  gtk_widget_queue_resize (impl->browse_files_current_view);
 }
 
 /* Callback used when a GtkSettings value changes */
@@ -3231,7 +3445,7 @@ set_sort_column (GtkFileChooserWidget *impl)
 {
   GtkTreeSortable *sortable;
 
-  sortable = GTK_TREE_SORTABLE (gtk_tree_view_get_model (GTK_TREE_VIEW (impl->browse_files_tree_view)));
+  sortable = GTK_TREE_SORTABLE (impl->current_model);
 
   /* can happen when we're still populating the model */
   if (sortable == NULL)
@@ -3245,6 +3459,7 @@ set_sort_column (GtkFileChooserWidget *impl)
 static void
 settings_load (GtkFileChooserWidget *impl)
 {
+  ViewMode view_mode;
   gboolean show_hidden;
   gboolean show_size_column;
   gboolean show_type_column;
@@ -3252,6 +3467,7 @@ settings_load (GtkFileChooserWidget *impl)
   DateFormat date_format;
   TypeFormat type_format;
   int sort_column;
+  gint icon_view_scale;
   GtkSortType sort_order;
   StartupMode startup_mode;
   int sidebar_width;
@@ -3259,6 +3475,8 @@ settings_load (GtkFileChooserWidget *impl)
 
   settings = _gtk_file_chooser_get_settings_for_widget (GTK_WIDGET (impl));
 
+  view_mode = g_settings_get_enum (settings, SETTINGS_KEY_VIEW_MODE);
+  icon_view_scale = g_settings_get_int (settings, SETTINGS_KEY_ICON_VIEW_SCALE);
   show_hidden = g_settings_get_boolean (settings, SETTINGS_KEY_SHOW_HIDDEN);
   show_size_column = g_settings_get_boolean (settings, SETTINGS_KEY_SHOW_SIZE_COLUMN);
   show_type_column = g_settings_get_boolean (settings, SETTINGS_KEY_SHOW_TYPE_COLUMN);
@@ -3270,12 +3488,18 @@ settings_load (GtkFileChooserWidget *impl)
   date_format = g_settings_get_enum (settings, SETTINGS_KEY_DATE_FORMAT);
   type_format = g_settings_get_enum (settings, SETTINGS_KEY_TYPE_FORMAT);
 
+  gtk_range_set_value (GTK_RANGE (impl->icon_view_scale), icon_view_scale);
+  impl->icon_view_icon_size = icon_view_scale;
+
+  view_mode_set (impl, view_mode);
   set_show_hidden (impl, show_hidden);
 
   impl->show_size_column = show_size_column;
-  gtk_tree_view_column_set_visible (impl->list_size_column, show_size_column);
-  impl->show_type_column = show_type_column;
-  gtk_tree_view_column_set_visible (impl->list_type_column, show_type_column);
+  if (impl->list_size_column) {
+    gtk_tree_view_column_set_visible (impl->list_size_column, show_size_column);
+    impl->show_type_column = show_type_column;
+    gtk_tree_view_column_set_visible (impl->list_type_column, show_type_column);
+  }
 
   impl->sort_column = sort_column;
   impl->sort_order = sort_order;
@@ -3312,6 +3536,8 @@ settings_save (GtkFileChooserWidget *impl)
   /* All the other state */
 
   g_settings_set_enum (settings, SETTINGS_KEY_LOCATION_MODE, impl->location_mode);
+  g_settings_set_enum (settings, SETTINGS_KEY_VIEW_MODE, impl->view_mode);
+  g_settings_set_int (settings, SETTINGS_KEY_ICON_VIEW_SCALE, impl->icon_view_icon_size);
   g_settings_set_boolean (settings, SETTINGS_KEY_SHOW_HIDDEN, impl->show_hidden);
   g_settings_set_boolean (settings, SETTINGS_KEY_SHOW_SIZE_COLUMN, impl->show_size_column);
   g_settings_set_boolean (settings, SETTINGS_KEY_SHOW_TYPE_COLUMN, impl->show_type_column);
@@ -3786,10 +4012,14 @@ load_set_model (GtkFileChooserWidget *impl)
 {
   g_assert (impl->browse_files_model != NULL);
 
-  gtk_tree_view_set_model (GTK_TREE_VIEW (impl->browse_files_tree_view),
-                           GTK_TREE_MODEL (impl->browse_files_model));
-  update_columns (impl, FALSE, _("Modified"));
-  file_list_set_sort_column_ids (impl);
+  current_view_set_file_model (impl, GTK_TREE_MODEL (impl->browse_files_model));
+  if (impl->view_mode == VIEW_MODE_LIST)
+    {
+      gtk_tree_view_set_model (GTK_TREE_VIEW (impl->browse_files_tree_view),
+                               GTK_TREE_MODEL (impl->browse_files_model));
+      update_columns (impl, FALSE, _("Modified"));
+      file_list_set_sort_column_ids (impl);
+    }
   set_sort_column (impl);
   impl->list_sort_ascending = TRUE;
 
@@ -3856,7 +4086,7 @@ browse_files_select_first_row (GtkFileChooserWidget *impl)
   GtkTreeIter dummy_iter;
   GtkTreeModel *tree_model;
 
-  tree_model = gtk_tree_view_get_model (GTK_TREE_VIEW (impl->browse_files_tree_view));
+  tree_model = impl->current_model;
 
   if (!tree_model)
     return;
@@ -3875,7 +4105,7 @@ browse_files_select_first_row (GtkFileChooserWidget *impl)
        */
       impl->auto_selecting_first_row = TRUE;
 
-      gtk_tree_view_set_cursor (GTK_TREE_VIEW (impl->browse_files_tree_view), path, NULL, FALSE);
+      current_view_set_cursor (impl, path);
 
       impl->auto_selecting_first_row = FALSE;
     }
@@ -3901,7 +4131,13 @@ center_selected_row_foreach_cb (GtkTreeModel      *model,
   if (closure->already_centered)
     return;
 
-  gtk_tree_view_scroll_to_cell (GTK_TREE_VIEW (closure->impl->browse_files_tree_view), path, NULL, TRUE, 0.5, 0.0);
+  if (closure->impl->view_mode == VIEW_MODE_LIST)
+    gtk_tree_view_scroll_to_cell (GTK_TREE_VIEW (closure->impl->browse_files_tree_view), path, NULL, TRUE, 0.5, 0.0);
+  else if (closure->impl->view_mode == VIEW_MODE_ICON)
+    gtk_icon_view_scroll_to_path (GTK_ICON_VIEW (closure->impl->browse_files_icon_view), path, TRUE, 0.5, 0.0);
+  else
+    g_assert_not_reached ();
+
   closure->already_centered = TRUE;
 }
 
@@ -3910,20 +4146,17 @@ static void
 browse_files_center_selected_row (GtkFileChooserWidget *impl)
 {
   struct center_selected_row_closure closure;
-  GtkTreeSelection *selection;
 
   closure.impl = impl;
   closure.already_centered = FALSE;
 
-  selection = gtk_tree_view_get_selection (GTK_TREE_VIEW (impl->browse_files_tree_view));
-  gtk_tree_selection_selected_foreach (selection, center_selected_row_foreach_cb, &closure);
+  current_selection_selected_foreach(impl, center_selected_row_foreach_cb, &closure);
 }
 
 static gboolean
 show_and_select_files (GtkFileChooserWidget *impl,
                        GSList               *files)
 {
-  GtkTreeSelection *selection;
   GtkFileSystemModel *fsmodel;
   gboolean enabled_hidden, removed_filters;
   gboolean selected_a_file;
@@ -3932,8 +4165,7 @@ show_and_select_files (GtkFileChooserWidget *impl,
   g_assert (impl->load_state == LOAD_FINISHED);
   g_assert (impl->browse_files_model != NULL);
 
-  selection = gtk_tree_view_get_selection (GTK_TREE_VIEW (impl->browse_files_tree_view));
-  fsmodel = GTK_FILE_SYSTEM_MODEL (gtk_tree_view_get_model (GTK_TREE_VIEW (impl->browse_files_tree_view)));
+  fsmodel = GTK_FILE_SYSTEM_MODEL (impl->current_model);
 
   g_assert (fsmodel == impl->browse_files_model);
 
@@ -3988,11 +4220,10 @@ show_and_select_files (GtkFileChooserWidget *impl,
         {
           GtkTreePath *path;
 
-          gtk_tree_selection_select_iter (selection, &iter);
+          current_selection_select_iter (impl, &iter);
 
           path = gtk_tree_model_get_path (GTK_TREE_MODEL (fsmodel), &iter);
-          gtk_tree_view_set_cursor (GTK_TREE_VIEW (impl->browse_files_tree_view),
-                                    path, NULL, FALSE);
+          current_view_set_cursor (impl, path);
           gtk_tree_path_free (path);
 
           selected_a_file = TRUE;
@@ -4126,12 +4357,15 @@ static void
 stop_loading_and_clear_list_model (GtkFileChooserWidget *impl,
                                    gboolean              remove)
 {
+  if (impl->current_model == GTK_TREE_MODEL (impl->browse_files_model))
+    impl->current_model = NULL;
+
   load_remove_timer (impl, LOAD_EMPTY);
 
   g_set_object (&impl->browse_files_model, NULL);
 
   if (remove)
-    gtk_tree_view_set_model (GTK_TREE_VIEW (impl->browse_files_tree_view), NULL);
+    current_view_set_file_model (impl, NULL);
 }
 
 /* Replace 'target' with 'replacement' in the input string. */
@@ -4386,6 +4620,17 @@ end:
 }
 
 static gboolean
+get_visible_range (GtkTreePath **start, GtkTreePath **end,
+                   GtkFileChooserWidget *impl)
+{
+  if (impl->view_mode == VIEW_MODE_LIST)
+    return gtk_tree_view_get_visible_range (GTK_TREE_VIEW (impl->browse_files_tree_view), start, end);
+  if (impl->view_mode == VIEW_MODE_ICON)
+    return gtk_icon_view_get_visible_range (GTK_ICON_VIEW (impl->browse_files_icon_view), start, end);
+  g_assert_not_reached ();
+}
+
+static gboolean
 file_system_model_set (GtkFileSystemModel *model,
                        GFile              *file,
                        GFileInfo          *info,
@@ -4442,6 +4687,82 @@ file_system_model_set (GtkFileSystemModel *model,
       else
         g_value_set_boolean (value, TRUE);
       break;
+    case MODEL_COL_ICON_PIXBUF:
+      if (info)
+        {
+          GtkTreeModel *tree_model;
+          GtkTreePath *path, *start, *end;
+          GtkTreeIter iter;
+          int icon_size;
+          gboolean file_visible;
+
+          tree_model = impl->current_model;
+          if (tree_model != GTK_TREE_MODEL (model))
+            return FALSE;
+
+          /* #1 use standard icon if it is loaded */
+          if (g_file_info_has_attribute (info, G_FILE_ATTRIBUTE_STANDARD_ICON))
+            {
+              icon_size = impl->icon_view_icon_size;
+
+              //TODO: fix the icon stuff
+              /*cairo_surface_t *icon_surface = _gtk_file_info_render_icon (info, GTK_WIDGET (impl), icon_size);
+              GdkPixbuf *icon_pixbuf = gdk_pixbuf_get_from_surface(icon_surface,
+                                                                   0, 0,
+                                                                   cairo_image_surface_get_width(icon_surface),
+                                                                   cairo_image_surface_get_height(icon_surface));
+              cairo_surface_destroy(icon_surface);*/
+              int scale;
+              GtkIconTheme *icon_theme;
+
+              scale = gtk_widget_get_scale_factor (GTK_WIDGET (impl));
+              icon_theme = gtk_icon_theme_get_for_display (gtk_widget_get_display (GTK_WIDGET (impl)));
+
+              g_value_take_object (value, _gtk_file_info_get_icon (info, icon_size, scale, icon_theme));
+              return TRUE;
+            }
+
+          if (!get_visible_range (&start, &end, impl))
+            return FALSE;
+
+          if (!_gtk_file_system_model_get_iter_for_file (model,
+                                                         &iter,
+                                                         file))
+            g_assert_not_reached ();
+
+          path = gtk_tree_model_get_path (tree_model, &iter);
+          file_visible = (gtk_tree_path_compare (start, path) != 1 &&
+                          gtk_tree_path_compare (path, end) != 1);
+
+          gtk_tree_path_free (path);
+          gtk_tree_path_free (start);
+          gtk_tree_path_free (end);
+
+          if (file_visible)
+            {
+              /* #2 start loading standard icon (callback will be handled by #1) */
+              if (!g_file_info_has_attribute (info, "filechooser::icon_queried"))
+                {
+                  g_file_info_set_attribute_boolean (info, "filechooser::icon_queried", TRUE);
+                  g_file_query_info_async (file,
+                                           G_FILE_ATTRIBUTE_THUMBNAIL_PATH ","
+                                           G_FILE_ATTRIBUTE_THUMBNAILING_FAILED ","
+                                           G_FILE_ATTRIBUTE_STANDARD_ICON,
+                                           G_FILE_QUERY_INFO_NONE,
+                                           G_PRIORITY_DEFAULT,
+                                           _gtk_file_system_model_get_cancellable (model),
+                                           file_system_model_got_thumbnail,
+                                           model);
+                }
+
+            }
+          return FALSE;
+        }
+      else
+        {
+          g_value_set_object (value, NULL);
+        }
+      break;
     case MODEL_COL_ICON:
       if (info)
         {
@@ -4453,7 +4774,7 @@ file_system_model_set (GtkFileSystemModel *model,
               scale = gtk_widget_get_scale_factor (GTK_WIDGET (impl));
               icon_theme = gtk_icon_theme_get_for_display (gtk_widget_get_display (GTK_WIDGET (impl)));
 
-              g_value_take_object (value, _gtk_file_info_get_icon (info, ICON_SIZE, scale, icon_theme));
+              g_value_take_object (value, _gtk_file_info_get_icon (info, LIST_VIEW_ICON_SIZE, scale, icon_theme));
             }
           else
             {
@@ -4691,7 +5012,6 @@ update_chooser_entry_selected_foreach (GtkTreeModel *model,
 static void
 update_chooser_entry (GtkFileChooserWidget *impl)
 {
-  GtkTreeSelection *selection;
   struct update_chooser_entry_selected_foreach_closure closure;
 
   /* no need to update the file chooser's entry if there's no entry */
@@ -4707,9 +5027,8 @@ update_chooser_entry (GtkFileChooserWidget *impl)
 
   g_assert (impl->location_entry != NULL);
 
-  selection = gtk_tree_view_get_selection (GTK_TREE_VIEW (impl->browse_files_tree_view));
   closure.num_selected = 0;
-  gtk_tree_selection_selected_foreach (selection, update_chooser_entry_selected_foreach, &closure);
+  current_selection_selected_foreach (impl, update_chooser_entry_selected_foreach, &closure);
 
   if (closure.num_selected == 0)
     {
@@ -5182,19 +5501,15 @@ gtk_file_chooser_widget_unselect_file (GtkFileChooser *chooser,
                                        GFile          *file)
 {
   GtkFileChooserWidget *impl = GTK_FILE_CHOOSER_WIDGET (chooser);
-  GtkTreeView *tree_view;
-  GtkTreeModel *model;
   GtkTreeIter iter;
 
-  tree_view = GTK_TREE_VIEW (impl->browse_files_tree_view);
-  model = gtk_tree_view_get_model (tree_view);
-  if (!model)
+  if (!impl->current_model)
     return;
 
-  if (!_gtk_file_system_model_get_iter_for_file (GTK_FILE_SYSTEM_MODEL (model), &iter, file))
+  if (!_gtk_file_system_model_get_iter_for_file (GTK_FILE_SYSTEM_MODEL (impl->current_model), &iter, file))
     return;
 
-  gtk_tree_selection_unselect_iter (gtk_tree_view_get_selection (tree_view), &iter);
+  current_selection_unselect_iter (impl, &iter);
 }
 
 static gboolean
@@ -5204,11 +5519,8 @@ maybe_select (GtkTreeModel *model,
               gpointer      data)
 {
   GtkFileChooserWidget *impl = GTK_FILE_CHOOSER_WIDGET (data);
-  GtkTreeSelection *selection;
   gboolean is_sensitive;
   gboolean is_folder;
-
-  selection = gtk_tree_view_get_selection (GTK_TREE_VIEW (impl->browse_files_tree_view));
 
   gtk_tree_model_get (model, iter,
                       MODEL_COL_IS_FOLDER, &is_folder,
@@ -5218,9 +5530,9 @@ maybe_select (GtkTreeModel *model,
   if (is_sensitive &&
       ((is_folder && impl->action == GTK_FILE_CHOOSER_ACTION_SELECT_FOLDER) ||
        (!is_folder && impl->action == GTK_FILE_CHOOSER_ACTION_OPEN)))
-    gtk_tree_selection_select_iter (selection, iter);
+    current_selection_select_iter (impl, iter);
   else
-    gtk_tree_selection_unselect_iter (selection, iter);
+    current_selection_unselect_iter (impl, iter);
 
   return FALSE;
 }
@@ -5235,8 +5547,15 @@ gtk_file_chooser_widget_select_all (GtkFileChooser *chooser)
     {
       GtkTreeSelection *selection;
 
-      selection = gtk_tree_view_get_selection (GTK_TREE_VIEW (impl->browse_files_tree_view));
-      gtk_tree_selection_select_all (selection);
+      if (impl->view_mode == VIEW_MODE_LIST)
+        {
+          selection = gtk_tree_view_get_selection (GTK_TREE_VIEW (impl->browse_files_tree_view));
+          gtk_tree_selection_select_all (selection);
+        }
+      else if (impl->view_mode == VIEW_MODE_ICON)
+        gtk_icon_view_select_all (GTK_ICON_VIEW (impl->browse_files_icon_view));
+      else
+        g_assert_not_reached();
       return;
     }
 
@@ -5249,9 +5568,7 @@ static void
 gtk_file_chooser_widget_unselect_all (GtkFileChooser *chooser)
 {
   GtkFileChooserWidget *impl = GTK_FILE_CHOOSER_WIDGET (chooser);
-  GtkTreeSelection *selection = gtk_tree_view_get_selection (GTK_TREE_VIEW (impl->browse_files_tree_view));
-
-  gtk_tree_selection_unselect_all (selection);
+  current_selection_unselect_all (impl);
   pending_select_files_free (impl);
 }
 
@@ -5422,15 +5739,12 @@ gtk_file_chooser_widget_get_files (GtkFileChooser *chooser)
     current_focus = NULL;
 
   file_list_seen = FALSE;
-  if (current_focus == impl->browse_files_tree_view)
+  if (current_focus == impl->browse_files_current_view)
     {
-      GtkTreeSelection *selection;
-
     file_list:
 
       file_list_seen = TRUE;
-      selection = gtk_tree_view_get_selection (GTK_TREE_VIEW (impl->browse_files_tree_view));
-      gtk_tree_selection_selected_foreach (selection, get_files_foreach, &info);
+      current_selection_selected_foreach (impl, get_files_foreach, &info);
 
       /* If there is no selection in the file list, we probably have this situation:
        *
@@ -5470,7 +5784,7 @@ gtk_file_chooser_widget_get_files (GtkFileChooser *chooser)
       else
         return NULL;
     }
-  else if (impl->toplevel_last_focus_widget == impl->browse_files_tree_view)
+  else if (impl->toplevel_last_focus_widget == impl->browse_files_current_view)
     goto file_list;
   else if (impl->location_entry && impl->toplevel_last_focus_widget == impl->location_entry)
     goto file_entry;
@@ -5640,7 +5954,6 @@ switch_folder_foreach_cb (GtkTreeModel *model,
 static void
 switch_to_selected_folder (GtkFileChooserWidget *impl)
 {
-  GtkTreeSelection *selection;
   struct switch_folder_closure closure;
 
   /* We do this with foreach() rather than get_selected() as we may be in
@@ -5651,9 +5964,7 @@ switch_to_selected_folder (GtkFileChooserWidget *impl)
   closure.file = NULL;
   closure.num_selected = 0;
 
-  selection = gtk_tree_view_get_selection (GTK_TREE_VIEW (impl->browse_files_tree_view));
-  gtk_tree_selection_selected_foreach (selection, switch_folder_foreach_cb, &closure);
-
+  current_selection_selected_foreach (impl, switch_folder_foreach_cb, &closure);
   g_assert (closure.file && closure.num_selected == 1);
 
   change_folder_and_display_error (impl, closure.file, FALSE);
@@ -5669,19 +5980,32 @@ get_selected_file_info_from_file_list (GtkFileChooserWidget *impl,
   GtkTreeSelection *selection;
   GtkTreeIter iter;
   GFileInfo *info;
-  GtkTreeModel *model;
 
   g_assert (!impl->select_multiple);
-  selection = gtk_tree_view_get_selection (GTK_TREE_VIEW (impl->browse_files_tree_view));
-  if (!gtk_tree_selection_get_selected (selection, &model, &iter))
+  if (impl->view_mode == VIEW_MODE_LIST)
     {
-      *had_selection = FALSE;
-      return NULL;
+      selection = gtk_tree_view_get_selection (GTK_TREE_VIEW (impl->browse_files_tree_view));
+      if (!gtk_tree_selection_get_selected (selection, NULL, &iter))
+        {
+          *had_selection = FALSE;
+          return NULL;
+        }
+
+      *had_selection = TRUE;
     }
+  else if (impl->view_mode == VIEW_MODE_ICON)
+    {
+      if (!get_selected_tree_iter_from_icon_view (impl, &iter))
+        {
+          *had_selection = FALSE;
+          return NULL;
+        }
+      *had_selection = TRUE;
+    }
+  else
+    g_assert_not_reached();
 
-  *had_selection = TRUE;
-
-  info = _gtk_file_system_model_get_info (GTK_FILE_SYSTEM_MODEL (model), &iter);
+  info = _gtk_file_system_model_get_info (GTK_FILE_SYSTEM_MODEL (impl->current_model), &iter);
   return info;
 }
 
@@ -6136,7 +6460,7 @@ gtk_file_chooser_widget_should_respond (GtkFileChooserWidget *impl)
 
   current_focus = gtk_root_get_focus (GTK_ROOT (toplevel));
 
-  if (current_focus == impl->browse_files_tree_view)
+  if (current_focus == impl->browse_files_current_view)
     {
       /* The following array encodes what we do based on the impl->action and the
        * number of files selected.
@@ -6382,7 +6706,7 @@ gtk_file_chooser_widget_initial_focus (GtkFileChooserWidget *impl)
     {
       if (impl->location_mode == LOCATION_MODE_PATH_BAR
           || impl->operation_mode == OPERATION_MODE_RECENT)
-        widget = impl->browse_files_tree_view;
+        widget = impl->browse_files_current_view;
       else
         widget = impl->location_entry;
     }
@@ -6396,6 +6720,7 @@ gtk_file_chooser_widget_initial_focus (GtkFileChooserWidget *impl)
 
   g_assert (widget != NULL);
   gtk_widget_grab_focus (widget);
+  create_browse_files_icon_view (impl);
 }
 
 static void
@@ -6420,42 +6745,23 @@ static GSList *
 get_selected_files (GtkFileChooserWidget *impl)
 {
   GSList *result;
-  GtkTreeSelection *selection;
 
   result = NULL;
 
-  selection = gtk_tree_view_get_selection (GTK_TREE_VIEW (impl->browse_files_tree_view));
-  gtk_tree_selection_selected_foreach (selection, selected_foreach_get_file_cb, &result);
+  current_selection_selected_foreach (impl, selected_foreach_get_file_cb, &result);
   result = g_slist_reverse (result);
 
   return result;
-}
-
-static void
-selected_foreach_get_info_cb (GtkTreeModel *model,
-                              GtkTreePath  *path,
-                              GtkTreeIter  *iter,
-                              gpointer      data)
-{
-  GSList **list;
-  GFileInfo *info;
-
-  list = data;
-
-  info = _gtk_file_system_model_get_info (GTK_FILE_SYSTEM_MODEL (model), iter);
-  *list = g_slist_prepend (*list, g_object_ref (info));
 }
 
 static GSList *
 get_selected_infos (GtkFileChooserWidget *impl)
 {
   GSList *result;
-  GtkTreeSelection *selection;
 
   result = NULL;
 
-  selection = gtk_tree_view_get_selection (GTK_TREE_VIEW (impl->browse_files_tree_view));
-  gtk_tree_selection_selected_foreach (selection, selected_foreach_get_info_cb, &result);
+  current_selection_selected_foreach (impl, selected_foreach_get_file_cb, &result);
   result = g_slist_reverse (result);
 
   return result;
@@ -6520,6 +6826,7 @@ search_engine_finished_cb (GtkSearchEngine *engine,
       gtk_stack_set_visible_child_name (GTK_STACK (impl->browse_files_stack), "empty");
       gtk_widget_grab_focus (impl->search_entry);
     }
+  current_view_set_file_model (impl, GTK_TREE_MODEL (impl->search_model));
 }
 
 static void
@@ -6543,7 +6850,7 @@ search_clear_model (GtkFileChooserWidget *impl,
 
   if (remove &&
       gtk_tree_view_get_model (GTK_TREE_VIEW (impl->browse_files_tree_view)) == GTK_TREE_MODEL (impl->search_model))
-    gtk_tree_view_set_model (GTK_TREE_VIEW (impl->browse_files_tree_view), NULL);
+    current_view_set_file_model (impl, NULL);
 
   g_clear_object (&impl->search_model);
 }
@@ -6746,7 +7053,7 @@ recent_clear_model (GtkFileChooserWidget *impl,
     return;
 
   if (remove)
-    gtk_tree_view_set_model (GTK_TREE_VIEW (impl->browse_files_tree_view), NULL);
+    current_view_set_file_model (impl, NULL);
 
   g_set_object (&impl->recent_model, NULL);
 }
@@ -6849,12 +7156,9 @@ recent_start_loading (GtkFileChooserWidget *impl)
 static gboolean
 recent_should_respond (GtkFileChooserWidget *impl)
 {
-  GtkTreeSelection *selection;
-
   g_assert (impl->operation_mode == OPERATION_MODE_RECENT);
 
-  selection = gtk_tree_view_get_selection (GTK_TREE_VIEW (impl->browse_files_tree_view));
-  return (gtk_tree_selection_count_selected_rows (selection) != 0);
+  return (current_selection_count_selected_rows (impl) != 0);
 }
 
 static void
@@ -6934,13 +7238,11 @@ list_select_func (GtkTreeSelection *selection,
   return TRUE;
 }
 
+/* GtkTreeSelection or GtkIconView selection changed. */
 static void
-list_selection_changed (GtkTreeSelection     *selection,
-                        GtkFileChooserWidget *impl)
+list_selection_changed (void                  *selection,
+                        GtkFileChooserWidget  *impl)
 {
-  if (gtk_tree_view_get_model (GTK_TREE_VIEW (impl->browse_files_tree_view)) == NULL)
-    return;
-
   if (impl->location_entry &&
       impl->browse_files_model)
     update_chooser_entry (impl);
@@ -6973,13 +7275,32 @@ list_row_activated (GtkTreeView          *tree_view,
                     GtkTreeViewColumn    *column,
                     GtkFileChooserWidget *impl)
 {
+  GtkTreeModel *model;
+  model = gtk_tree_view_get_model (tree_view);
+  item_activated (model, path, impl);
+}
+
+/* Callback used when a item in the icon file list is activated. */
+static void
+icon_item_activated (GtkIconView           *icon_view,
+                     GtkTreePath           *path,
+                     GtkFileChooserWidget  *impl)
+{
+  GtkTreeModel *model;
+  model = gtk_icon_view_get_model (icon_view);
+  item_activated (model, path, impl);
+}
+
+/* Common implementation for list_row_activated and icon_item_activated */
+static void
+item_activated (GtkTreeModel          *model,
+                GtkTreePath           *path,
+                GtkFileChooserWidget  *impl)
+{
   GFile *file;
   GtkTreeIter iter;
-  GtkTreeModel *model;
   gboolean is_folder;
   gboolean is_sensitive;
-
-  model = gtk_tree_view_get_model (tree_view);
 
   if (!gtk_tree_model_get_iter (model, &iter, path))
     return;
@@ -6998,9 +7319,9 @@ list_row_activated (GtkTreeView          *tree_view,
 
   if (impl->action == GTK_FILE_CHOOSER_ACTION_OPEN ||
       impl->action == GTK_FILE_CHOOSER_ACTION_SAVE)
-    gtk_widget_activate_default (GTK_WIDGET (impl));
+    g_signal_emit_by_name (impl, "file-activated");
 
- out:
+  out:
 
   if (file)
     g_object_unref (file);
@@ -7030,6 +7351,9 @@ path_bar_clicked (GtkPathBar           *path_bar,
 static void
 update_cell_renderer_attributes (GtkFileChooserWidget *impl)
 {
+  /* only applicable in the tree view (i.e. list view) */
+  if (!impl->browse_files_tree_view)
+    return;
   gtk_tree_view_column_set_attributes (impl->list_name_column,
                                        impl->list_pixbuf_renderer,
                                        "gicon", MODEL_COL_ICON,
@@ -7650,15 +7974,19 @@ gtk_file_chooser_widget_class_init (GtkFileChooserWidgetClass *class)
   gtk_widget_class_bind_template_child (widget_class, GtkFileChooserWidget, browse_files_stack);
   gtk_widget_class_bind_template_child (widget_class, GtkFileChooserWidget, places_sidebar);
   gtk_widget_class_bind_template_child (widget_class, GtkFileChooserWidget, places_view);
+  gtk_widget_class_bind_template_child (widget_class, GtkFileChooserWidget, view_notebook);
+  gtk_widget_class_bind_template_child (widget_class, GtkFileChooserWidget, browse_files_list_swin);
   gtk_widget_class_bind_template_child (widget_class, GtkFileChooserWidget, browse_files_tree_view);
-  gtk_widget_class_bind_template_child (widget_class, GtkFileChooserWidget, browse_files_swin);
   gtk_widget_class_bind_template_child (widget_class, GtkFileChooserWidget, browse_header_revealer);
   gtk_widget_class_bind_template_child (widget_class, GtkFileChooserWidget, browse_header_stack);
+  gtk_widget_class_bind_template_child (widget_class, GtkFileChooserWidget, browse_files_icon_swin);
+  gtk_widget_class_bind_template_child (widget_class, GtkFileChooserWidget, browse_files_icon_view);
   gtk_widget_class_bind_template_child (widget_class, GtkFileChooserWidget, browse_new_folder_button);
   gtk_widget_class_bind_template_child (widget_class, GtkFileChooserWidget, browse_path_bar_size_group);
   gtk_widget_class_bind_template_child (widget_class, GtkFileChooserWidget, browse_path_bar);
   gtk_widget_class_bind_template_child (widget_class, GtkFileChooserWidget, filter_combo_hbox);
   gtk_widget_class_bind_template_child (widget_class, GtkFileChooserWidget, filter_combo);
+  gtk_widget_class_bind_template_child (widget_class, GtkFileChooserWidget, icon_view_scale);
   gtk_widget_class_bind_template_child (widget_class, GtkFileChooserWidget, extra_align);
   gtk_widget_class_bind_template_child (widget_class, GtkFileChooserWidget, extra_and_filters);
   gtk_widget_class_bind_template_child (widget_class, GtkFileChooserWidget, location_entry_box);
@@ -7676,6 +8004,7 @@ gtk_file_chooser_widget_class_init (GtkFileChooserWidgetClass *class)
   gtk_widget_class_bind_template_child (widget_class, GtkFileChooserWidget, list_type_renderer);
   gtk_widget_class_bind_template_child (widget_class, GtkFileChooserWidget, list_location_column);
   gtk_widget_class_bind_template_child (widget_class, GtkFileChooserWidget, list_location_renderer);
+  gtk_widget_class_bind_template_child (widget_class, GtkFileChooserWidget, list_icon_renderer);
   gtk_widget_class_bind_template_child (widget_class, GtkFileChooserWidget, new_folder_name_entry);
   gtk_widget_class_bind_template_child (widget_class, GtkFileChooserWidget, new_folder_create_button);
   gtk_widget_class_bind_template_child (widget_class, GtkFileChooserWidget, new_folder_error_stack);
@@ -7685,6 +8014,7 @@ gtk_file_chooser_widget_class_init (GtkFileChooserWidgetClass *class)
   gtk_widget_class_bind_template_child (widget_class, GtkFileChooserWidget, rename_file_error_stack);
   gtk_widget_class_bind_template_child (widget_class, GtkFileChooserWidget, rename_file_popover);
   gtk_widget_class_bind_template_child (widget_class, GtkFileChooserWidget, remote_warning_bar);
+  gtk_widget_class_bind_template_child (widget_class, GtkFileChooserWidget, view_mode_combo_box);
   gtk_widget_class_bind_template_child (widget_class, GtkFileChooserWidget, box);
 
   /* And a *lot* of callbacks to bind ... */
@@ -7692,6 +8022,10 @@ gtk_file_chooser_widget_class_init (GtkFileChooserWidgetClass *class)
   gtk_widget_class_bind_template_callback (widget_class, list_row_activated);
   gtk_widget_class_bind_template_callback (widget_class, list_selection_changed);
   gtk_widget_class_bind_template_callback (widget_class, browse_files_tree_view_keynav_failed_cb);
+  gtk_widget_class_bind_template_callback (widget_class, icon_item_activated);
+  gtk_widget_class_bind_template_callback (widget_class, icon_view_scale_value_changed_cb);
+  gtk_widget_class_bind_template_callback (widget_class, view_mode_combo_box_changed_cb);
+  gtk_widget_class_bind_template_callback (widget_class, view_notebook_switch_page_cb);
   gtk_widget_class_bind_template_callback (widget_class, filter_combo_changed);
   gtk_widget_class_bind_template_callback (widget_class, path_bar_clicked);
   gtk_widget_class_bind_template_callback (widget_class, places_sidebar_open_location_cb);
@@ -7769,6 +8103,18 @@ post_process_ui (GtkFileChooserWidget *impl)
   g_signal_connect (target, "drop", G_CALLBACK (file_list_drag_drop_cb), impl);
   gtk_widget_add_controller (impl->browse_files_tree_view, GTK_EVENT_CONTROLLER (target));
 
+  /* Setup file list iconview */
+  //TODO: drag and drop stuff
+  /*gtk_icon_view_enable_model_drag_source (GTK_ICON_VIEW (impl->browse_files_icon_view),
+                                          GDK_BUTTON1_MASK,
+                                          GDK_ACTION_COPY | GDK_ACTION_MOVE);
+  gtk_drag_source_add_uri_targets (impl->browse_files_icon_view);
+  gtk_drag_dest_set (impl->browse_files_icon_view,
+                     GTK_DEST_DEFAULT_ALL,
+                     NULL, 0,
+                     GDK_ACTION_COPY | GDK_ACTION_MOVE);
+  gtk_drag_dest_add_uri_targets (impl->browse_files_icon_view);*/
+
   /* File browser treemodel columns are shared between GtkFileChooser implementations,
    * so we don't set cell renderer attributes in GtkBuilder, but rather keep that
    * in code.
@@ -7784,6 +8130,7 @@ post_process_ui (GtkFileChooserWidget *impl)
    * that impl->icon_size be already setup.
    */
   set_icon_cell_renderer_fixed_size (impl);
+  impl->browse_files_current_view = impl->browse_files_tree_view;
 
   gtk_popover_set_default_widget (GTK_POPOVER (impl->new_folder_popover), impl->new_folder_create_button);
   gtk_popover_set_default_widget (GTK_POPOVER (impl->rename_file_popover), impl->rename_file_rename_button);
@@ -7936,6 +8283,246 @@ gtk_file_chooser_widget_new (GtkFileChooserAction action)
   return g_object_new (GTK_TYPE_FILE_CHOOSER_WIDGET,
                        "action", action,
                        NULL);
+}
+
+static gboolean
+get_selected_tree_iter_from_icon_view (GtkFileChooserWidget *impl,
+                                       GtkTreeIter           *iter_out)
+{
+  GList *icon_selection;
+  GtkTreePath *icon_selection_path;
+
+  icon_selection = gtk_icon_view_get_selected_items (GTK_ICON_VIEW (impl->browse_files_icon_view));
+  if (!icon_selection)
+    return FALSE;
+
+  icon_selection_path = g_list_nth_data (icon_selection, 0);
+  gtk_tree_model_get_iter (GTK_TREE_MODEL (impl->current_model),
+                           iter_out,
+                           icon_selection_path);
+
+  g_list_foreach (icon_selection, (GFunc) gtk_tree_path_free, NULL);
+  g_list_free (icon_selection);
+  return TRUE;
+}
+
+static void
+icon_view_selection_selected_foreach (GtkFileChooserWidget       *impl,
+                                      GtkTreeSelectionForeachFunc func,
+                                      gpointer                    data)
+{
+  GtkTreeIter iter;
+  GList *icon_selection;
+  GList *elem;
+  GtkTreePath *icon_selection_path;
+
+  icon_selection = gtk_icon_view_get_selected_items (GTK_ICON_VIEW (impl->browse_files_icon_view));
+  for (elem = icon_selection; elem; elem = elem->next)
+    {
+      icon_selection_path = elem->data;
+      gtk_tree_model_get_iter (GTK_TREE_MODEL (impl->current_model),
+                               &iter,
+                               icon_selection_path);
+      (* func) (GTK_TREE_MODEL (impl->current_model),
+                icon_selection_path,
+                &iter,
+                data);
+    }
+
+  g_list_foreach (icon_selection, (GFunc) gtk_tree_path_free, NULL);
+  g_list_free (icon_selection);
+}
+
+static void
+selection_selected_foreach (GtkFileChooserWidget       *impl,
+                            ViewMode                    view,
+                            GtkTreeSelectionForeachFunc func,
+                            gpointer                    data)
+{
+  if (impl->current_model == NULL)
+    return;
+
+  if (view == VIEW_MODE_LIST)
+    {
+      GtkTreeSelection *selection;
+      selection = gtk_tree_view_get_selection (GTK_TREE_VIEW (impl->browse_files_tree_view));
+      gtk_tree_selection_selected_foreach (selection, func, data);
+    }
+  else if (view == VIEW_MODE_ICON)
+    icon_view_selection_selected_foreach (impl, func, data);
+  else
+    g_assert_not_reached ();
+}
+
+static void
+current_selection_selected_foreach (GtkFileChooserWidget       *impl,
+                                    GtkTreeSelectionForeachFunc func,
+                                    gpointer                    data)
+{
+  selection_selected_foreach (impl, impl->view_mode, func, data);
+}
+
+static guint
+current_selection_count_selected_rows (GtkFileChooserWidget *impl)
+{
+  if (impl->view_mode == VIEW_MODE_LIST)
+    {
+      GtkTreeSelection *selection;
+      selection = gtk_tree_view_get_selection (GTK_TREE_VIEW (impl->browse_files_tree_view));
+      return gtk_tree_selection_count_selected_rows (selection);
+    }
+  if (impl->view_mode == VIEW_MODE_ICON)
+    {
+      GList *icon_selection;
+      icon_selection = gtk_icon_view_get_selected_items (GTK_ICON_VIEW (impl->browse_files_icon_view));
+      guint count = g_list_length (icon_selection);
+      g_list_foreach (icon_selection, (GFunc) gtk_tree_path_free, NULL);
+      g_list_free (icon_selection);
+      return count;
+    }
+  g_assert_not_reached ();
+  return 0;
+}
+
+static void
+selection_select_iter (GtkFileChooserWidget *impl,
+                       GtkTreeIter           *iter,
+                       ViewMode               target)
+{
+  if (target == VIEW_MODE_LIST)
+    {
+      GtkTreeSelection *selection;
+      selection = gtk_tree_view_get_selection (GTK_TREE_VIEW (impl->browse_files_tree_view));
+      gtk_tree_selection_select_iter (selection, iter);
+    }
+  else if (target == VIEW_MODE_ICON)
+    {
+      GtkTreePath *path;
+      path = gtk_tree_model_get_path (impl->current_model, iter);
+      gtk_icon_view_select_path (GTK_ICON_VIEW (impl->browse_files_icon_view), path);
+      gtk_tree_path_free (path);
+    }
+  else
+    g_assert_not_reached ();
+}
+
+static void
+current_selection_select_iter (GtkFileChooserWidget *impl,
+                               GtkTreeIter           *iter)
+{
+  selection_select_iter (impl, iter, impl->view_mode);
+}
+
+struct copy_old_selection_to_current_view_closure {
+  GtkFileChooserWidget *impl;
+};
+
+static void
+copy_old_selection_to_current_view_foreach_cp (GtkTreeModel *model,
+                                               GtkTreePath  *path,
+                                               GtkTreeIter  *iter,
+                                               gpointer      data)
+{
+  struct copy_old_selection_to_current_view_closure *closure;
+  closure = data;
+  selection_select_iter (closure->impl, iter, closure->impl->view_mode);
+}
+
+static void
+copy_old_selection_to_current_view (GtkFileChooserWidget *impl,
+                                    ViewMode               old_view_mode)
+{
+  struct copy_old_selection_to_current_view_closure closure;
+  closure.impl = impl;
+
+  selection_selected_foreach(impl,
+                             old_view_mode,
+                             copy_old_selection_to_current_view_foreach_cp,
+                             &closure);
+}
+
+static void
+current_selection_unselect_iter (GtkFileChooserWidget *impl,
+                                 GtkTreeIter           *iter)
+{
+  if (impl->view_mode == VIEW_MODE_LIST)
+    {
+      GtkTreeSelection *selection;
+      selection = gtk_tree_view_get_selection (GTK_TREE_VIEW (impl->browse_files_tree_view));
+      gtk_tree_selection_unselect_iter (selection, iter);
+    }
+  else if (impl->view_mode == VIEW_MODE_ICON)
+    {
+      GtkTreePath *path;
+      path = gtk_tree_model_get_path (impl->current_model, iter);
+      gtk_icon_view_unselect_path (GTK_ICON_VIEW (impl->browse_files_icon_view), path);
+      gtk_tree_path_free (path);
+    }
+  else
+    g_assert_not_reached ();
+}
+
+static void
+current_selection_unselect_all (GtkFileChooserWidget *impl)
+{
+  if (impl->view_mode == VIEW_MODE_LIST)
+    {
+      GtkTreeSelection *selection;
+      selection = gtk_tree_view_get_selection (GTK_TREE_VIEW (impl->browse_files_tree_view));
+      gtk_tree_selection_unselect_all (selection);
+    }
+  else if (impl->view_mode == VIEW_MODE_ICON)
+    gtk_icon_view_unselect_all (GTK_ICON_VIEW (impl->browse_files_icon_view));
+  else
+    g_assert_not_reached ();
+}
+
+static void
+current_view_set_file_model (GtkFileChooserWidget *impl, GtkTreeModel *model)
+{
+  GtkWidget *view;
+
+  impl->current_model = model;
+
+  if (impl->view_mode == VIEW_MODE_LIST)
+    view = impl->browse_files_tree_view;
+  else if (impl->view_mode == VIEW_MODE_ICON)
+    view = impl->browse_files_icon_view;
+  else
+    g_assert_not_reached ();
+
+  g_object_set (view, "model", impl->current_model, NULL);
+}
+
+static void
+current_view_set_cursor (GtkFileChooserWidget *impl, GtkTreePath *path)
+{
+  if (impl->view_mode == VIEW_MODE_LIST)
+    gtk_tree_view_set_cursor (GTK_TREE_VIEW (impl->browse_files_tree_view), path, NULL, FALSE);
+  else if (impl->view_mode == VIEW_MODE_ICON)
+    gtk_icon_view_set_cursor (GTK_ICON_VIEW (impl->browse_files_icon_view), path, NULL, FALSE);
+  else
+    g_assert_not_reached ();
+}
+
+static void
+current_view_set_select_multiple (GtkFileChooserWidget *impl, gboolean select_multiple)
+{
+  GtkTreeSelection *selection;
+  GtkSelectionMode mode;
+
+  mode = select_multiple ? GTK_SELECTION_MULTIPLE : GTK_SELECTION_BROWSE;
+
+  if (impl->view_mode == VIEW_MODE_LIST)
+    {
+      selection = gtk_tree_view_get_selection (GTK_TREE_VIEW (impl->browse_files_tree_view));
+      gtk_tree_selection_set_mode (selection, mode);
+      gtk_tree_view_set_rubber_banding (GTK_TREE_VIEW (impl->browse_files_tree_view), select_multiple);
+    }
+  else if (impl->view_mode == VIEW_MODE_ICON)
+    gtk_icon_view_set_selection_mode (GTK_ICON_VIEW (impl->browse_files_icon_view), mode);
+  else
+    g_assert_not_reached ();
 }
 
 static void

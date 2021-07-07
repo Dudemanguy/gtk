@@ -55,6 +55,11 @@
     <value nick='category' value='2'/>
   </enum>
 
+  <enum id='org.gtk.gtk4.Settings.FileChooser.ViewMode'>
+    <value nick='list-view' value='0'/>
+    <value nick='icon-view' value='1'/>
+  </enum>
+
   <schema id='org.gtk.gtk4.Settings.FileChooser' path='/org/gtk/gtk4/settings/file-chooser/'>
     <key name='last-folder-uri' type='s'>
       <default>""</default>
@@ -63,9 +68,23 @@
       <default>'path-bar'</default>
       <summary>Location mode</summary>
       <description>
-	Controls whether the file chooser shows just a path bar, or a visible entry
+        Controls whether the file chooser shows just a path bar, or a visible entry
         for the filename as well, for the benefit of typing-oriented users. The
         possible values for these modes are "path-bar" and "filename-entry".
+      </description>
+    </key>
+    <key name='view-mode' enum='org.gtk.gtk4.Settings.FileChooser.ViewMode'>
+      <default>'list-view'</default>
+      <summary>Change view mode</summary>
+      <description>
+        Controls the view mode used.
+      </description>
+    </key>
+    <key name='icon-view-scale' type='i'>
+      <default>32</default>
+      <summary>Change icon size</summary>
+      <description>
+        Controls the size of the icons in icon view mode.
       </description>
     </key>
     <key name='show-hidden' type='b'>
