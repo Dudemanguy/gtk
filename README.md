@@ -1,3 +1,6 @@
+# Note
+The gtk2 version of this patch is obsoleted by [gtk2-ng](https://git.devuan.org/Daemonratte/gtk2-ng) which contains the filechooser icon patch and other fixes/enhancements. The rest is left here for historical purposes.
+
 ## gtk2-filechooser-icon-view
 This is a personal fork of GTK2 with the intention of the solving the infamous [filechooser bug](https://bugzilla.gnome.org/show_bug.cgi?id=141154&). gtk2-filechooser-icon-view provides an alternative icon view for the filechooser dialog. This shows proper, resizable thumbnails in the dialog for any type of file that has thumbnails stored in ``~/.cache/thumbnails/``. A version for GTK3 also exists [here](https://github.com/Dudemanguy/gtk/tree/gtk3-filechooser-icon-view). 
 
